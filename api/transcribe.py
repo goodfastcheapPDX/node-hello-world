@@ -4,14 +4,8 @@ import json
 import urllib.parse
 import requests
 import os
-import io
 import tempfile
-from y2mate_api import Handler, session
-
-# Set up the cf_clearance cookie for y2mate-api
-CF_CLEARANCE = os.environ.get("CF_CLEARANCE")
-if CF_CLEARANCE:
-    session.cookies.update({"cf_clearance": CF_CLEARANCE})
+from pytube import YouTube
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -26,66 +20,64 @@ class handler(BaseHTTPRequestHandler):
                 self.send_error(400, "Missing video ID parameter. Use ?id=VIDEO_ID")
                 return
             
-            # Initialize y2mate Handler with the video ID
-            api = Handler(video_id)
+            # Construct YouTube URL
+            youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+            print(f"Processing YouTube video: {youtube_url}")
             
-            # Get the audio URL (mp3 format for better compatibility with Whisper)
-            audio_data = None
-            for item in api.run(format="mp3"):
-                audio_data = item
-                break  # Take the first result
-            
-            if not audio_data or 'dlink' not in audio_data:
-                self.send_error(404, "Could not extract audio URL for this video")
+            # Get audio using pytube (no cookie required)
+            try:
+                yt = YouTube(youtube_url)
+                video_title = yt.title
+                
+                # Get audio stream (audio only, lowest bitrate for faster processing)
+                audio_stream = yt.streams.filter(only_audio=True).order_by('abr').first()
+                if not audio_stream:
+                    self.send_error(404, "No audio stream found for this video")
+                    return
+                
+                print(f"Found audio stream: {audio_stream.mime_type}, {audio_stream.abr}")
+                
+                # Download to temporary file
+                temp_dir = tempfile.gettempdir()
+                temp_file_path = os.path.join(temp_dir, f"{video_id}.mp4")
+                
+                print(f"Downloading audio to {temp_file_path}...")
+                audio_stream.download(output_path=temp_dir, filename=f"{video_id}.mp4")
+                
+                print(f"Download complete: {os.path.getsize(temp_file_path)} bytes")
+                
+            except Exception as e:
+                self.send_error(500, f"Error downloading YouTube audio: {str(e)}")
                 return
-            
-            video_title = audio_data.get('title', 'Unknown Title')
-            audio_url = audio_data.get('dlink')
-            
-            print(f"Got audio URL for video: {video_title}")
-            
-            # Download the audio file
-            print(f"Downloading audio from URL...")
-            audio_response = requests.get(audio_url, stream=True)
-            
-            if audio_response.status_code != 200:
-                self.send_error(500, f"Failed to download audio: {audio_response.status_code}")
-                return
-            
-            # Save to a temporary file
-            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as temp_file:
-                for chunk in audio_response.iter_content(chunk_size=8192):
-                    if chunk:
-                        temp_file.write(chunk)
-                temp_file_path = temp_file.name
-            
-            print(f"Audio saved to temporary file: {temp_file_path}")
             
             # Send to Whisper API
             print("Sending to Whisper API...")
             openai_api_key = os.environ.get("OPENAI_API_KEY")
             if not openai_api_key:
                 self.send_error(500, "Missing OpenAI API key in environment variables")
-                os.unlink(temp_file_path)  # Clean up temp file
+                if os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)  # Clean up
                 return
             
             whisper_url = "https://api.openai.com/v1/audio/transcriptions"
             
-            with open(temp_file_path, 'rb') as audio_file:
-                files = {
-                    'file': (f"{video_id}.mp3", audio_file, 'audio/mpeg'),
-                    'model': (None, 'whisper-1'),
-                    'response_format': (None, 'verbose_json')
-                }
-                
-                headers = {
-                    'Authorization': f"Bearer {openai_api_key}"
-                }
-                
-                whisper_response = requests.post(whisper_url, headers=headers, files=files)
-            
-            # Clean up temporary file
-            os.unlink(temp_file_path)
+            try:
+                with open(temp_file_path, 'rb') as audio_file:
+                    files = {
+                        'file': (f"{video_id}.mp4", audio_file, 'audio/mp4'),
+                        'model': (None, 'whisper-1'),
+                        'response_format': (None, 'verbose_json')
+                    }
+                    
+                    headers = {
+                        'Authorization': f"Bearer {openai_api_key}"
+                    }
+                    
+                    whisper_response = requests.post(whisper_url, headers=headers, files=files)
+            finally:
+                # Clean up the temporary file
+                if os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)
             
             if whisper_response.status_code != 200:
                 self.send_error(500, f"Whisper API error: {whisper_response.text}")
@@ -110,7 +102,7 @@ class handler(BaseHTTPRequestHandler):
                 "video": {
                     "id": video_id,
                     "title": video_title,
-                    "url": f"https://www.youtube.com/watch?v={video_id}"
+                    "url": youtube_url
                 },
                 "transcript": {
                     "full": transcription.get('text', ''),
