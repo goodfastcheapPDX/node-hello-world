@@ -4,7 +4,7 @@ import { createReadStream, createWriteStream, unlinkSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
-import fetch from 'node-fetch';
+import fetch from 'isomorphic-fetch';
 import FormData from 'form-data';
 import { randomUUID } from 'crypto';
 import ytdl from 'ytdl-core';
