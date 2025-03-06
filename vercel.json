@@ -13,7 +13,6 @@
     }
   ],
   "env": {
-    "OPENAI_API_KEY": "@openai-api-key",
-    "CF_CLEARANCE": "@cf-clearance"
+    "OPENAI_API_KEY": "@openai-api-key"
   }
 }
