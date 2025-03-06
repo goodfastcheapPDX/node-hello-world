@@ -1,3 +1,3 @@
-pytubefix
 requests
 python-dotenv
+yt-dlp

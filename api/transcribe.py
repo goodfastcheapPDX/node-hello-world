@@ -5,8 +5,38 @@ import urllib.parse
 import requests
 import os
 import tempfile
-from pytubefix import YouTube
-from pytubefix.cli import on_progress
+import subprocess
+
+# Function to download audio using yt-dlp (most reliable approach)
+def download_youtube_audio(video_id, output_path):
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    # Construct command to download audio only, optimized for speed
+    command = [
+        "yt-dlp",
+        "--no-check-certificate",  # Skip HTTPS certification validation
+        "--no-warnings",           # Reduce output noise
+        "--quiet",                 # Even less output
+        "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio", # Prioritize smaller formats
+        "--extract-audio",
+        "--audio-format", "mp3",
+        "--audio-quality", "128K", # Lower quality = smaller file = faster upload to Whisper
+        "-o", output_path,
+        youtube_url
+    ]
+    
+    # Execute the command
+    process = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True
+    )
+    
+    if process.returncode != 0:
+        raise Exception(f"Error downloading audio: {process.stderr}")
+    
+    return process.stdout
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -21,35 +51,27 @@ class handler(BaseHTTPRequestHandler):
                 self.send_error(400, "Missing video ID parameter. Use ?id=VIDEO_ID")
                 return
             
-            # Construct YouTube URL
-            youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-            print(f"Processing YouTube video: {youtube_url}")
+            # Set up temporary file for audio
+            temp_dir = tempfile.gettempdir()
+            temp_file_path = os.path.join(temp_dir, f"{video_id}.mp3")
             
-            # Get audio using pytubefix (more reliable than pytube)
+            # Download audio using yt-dlp
             try:
-                yt = YouTube(youtube_url, on_progress_callback=on_progress)
-                video_title = yt.title
-                print(f"Video title: {video_title}")
+                print(f"Downloading audio for {video_id}...")
+                download_youtube_audio(video_id, temp_file_path)
                 
-                # Get audio stream (audio only, preferring higher quality while maintaining reasonable file size)
-                audio_stream = yt.streams.get_audio_only()
-                if not audio_stream:
-                    self.send_error(404, "No audio stream found for this video")
+                if not os.path.exists(temp_file_path):
+                    self.send_error(500, "Failed to download audio file")
                     return
+                    
+                file_size = os.path.getsize(temp_file_path)
+                print(f"Download complete: {file_size} bytes")
                 
-                print(f"Found audio stream: {audio_stream.mime_type}, {audio_stream.abr}")
-                
-                # Download to temporary file
-                temp_dir = tempfile.gettempdir()
-                temp_file_path = os.path.join(temp_dir, f"{video_id}.mp4")
-                
-                print(f"Downloading audio to {temp_file_path}...")
-                audio_stream.download(output_path=temp_dir, filename=f"{video_id}.mp4")
-                
-                print(f"Download complete: {os.path.getsize(temp_file_path)} bytes")
-                
+                if file_size == 0:
+                    self.send_error(500, "Downloaded audio file is empty")
+                    return
             except Exception as e:
-                self.send_error(500, f"Error downloading YouTube audio: {str(e)}")
+                self.send_error(500, f"Error downloading audio: {str(e)}")
                 return
             
             # Send to Whisper API
@@ -66,7 +88,7 @@ class handler(BaseHTTPRequestHandler):
             try:
                 with open(temp_file_path, 'rb') as audio_file:
                     files = {
-                        'file': (f"{video_id}.mp4", audio_file, 'audio/mp4'),
+                        'file': (f"{video_id}.mp3", audio_file, 'audio/mp3'),
                         'model': (None, 'whisper-1'),
                         'response_format': (None, 'verbose_json')
                     }
@@ -103,9 +125,7 @@ class handler(BaseHTTPRequestHandler):
                 "success": True,
                 "video": {
                     "id": video_id,
-                    "title": video_title,
-                    "url": youtube_url,
-                    "duration": yt.length  # Include video duration in seconds
+                    "url": f"https://www.youtube.com/watch?v={video_id}"
                 },
                 "transcript": {
                     "full": transcription.get('text', ''),
