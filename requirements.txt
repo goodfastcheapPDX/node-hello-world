@@ -1,3 +1,3 @@
-y2mate-api
+pytube
 requests
 python-dotenv
