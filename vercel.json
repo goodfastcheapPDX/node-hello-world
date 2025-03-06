@@ -11,8 +11,5 @@
       "src": "/api/transcribe",
       "dest": "/api/transcribe.py"
     }
-  ],
-  "env": {
-    "OPENAI_API_KEY": "@openai-api-key"
-  }
+  ]
 }
