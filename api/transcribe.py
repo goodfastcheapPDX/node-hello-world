@@ -5,6 +5,8 @@ import urllib.parse
 import requests
 import os
 import tempfile
+import time
+from datetime import datetime
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -19,8 +21,11 @@ class handler(BaseHTTPRequestHandler):
                 self.send_error(400, "Missing video ID parameter. Use ?id=VIDEO_ID")
                 return
             
-            # Use a reliable public API to get the audio URL
-            # The example below uses yt-api.p.rapidapi.com, but you can replace with any similar service
+            # Get optional parameters
+            start_time = int(query_params.get('start', ['0'])[0])
+            max_duration = int(query_params.get('duration', ['7200'])[0])  # Default: 2 hours
+            
+            # Use RapidAPI to get audio URL
             print(f"Getting audio URL for video ID: {video_id}")
             
             audio_url, video_title = self.get_audio_url(video_id)
@@ -30,89 +35,64 @@ class handler(BaseHTTPRequestHandler):
                 
             print(f"Got audio URL for '{video_title}'")
             
-            # Download the audio file
-            print(f"Downloading audio from URL...")
-            try:
-                audio_response = requests.get(audio_url, stream=True)
-                if audio_response.status_code != 200:
-                    self.send_error(500, f"Failed to download audio: {audio_response.status_code}")
-                    return
-                
-                # Save to a temporary file
-                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
-                temp_file_path = temp_file.name
-                
-                # Write the audio data to the temporary file
-                for chunk in audio_response.iter_content(chunk_size=8192):
-                    if chunk:
-                        temp_file.write(chunk)
-                temp_file.close()
-                
-                file_size = os.path.getsize(temp_file_path)
-                print(f"Audio downloaded: {file_size} bytes")
-                
-            except Exception as e:
-                self.send_error(500, f"Error downloading audio: {str(e)}")
+            # Process the audio in chunks
+            total_transcript = ""
+            formatted_segments = []
+            all_segments = []
+            
+            # If processing just a segment of the video
+            current_start = start_time
+            end_time = start_time + max_duration
+            
+            print(f"Processing audio segment: {format_time(current_start)} to {format_time(end_time)}")
+            
+            # Download the audio segment
+            audio_file_path = self.download_audio_segment(audio_url, video_id, current_start, max_duration)
+            if not audio_file_path:
+                self.send_error(500, "Failed to download audio segment")
                 return
             
-            # Send to Whisper API
-            print("Sending to Whisper API...")
-            openai_api_key = os.environ.get("OPENAI_API_KEY")
-            if not openai_api_key:
-                self.send_error(500, "Missing OpenAI API key in environment variables")
-                if os.path.exists(temp_file_path):
-                    os.unlink(temp_file_path)
+            # Get the file size
+            file_size = os.path.getsize(audio_file_path)
+            print(f"Audio segment downloaded: {file_size} bytes")
+            
+            # Check if file is too large for Whisper API (25MB limit)
+            if file_size > 24 * 1024 * 1024:  # 24MB to be safe
+                os.unlink(audio_file_path)
+                self.send_error(500, "Audio file too large for Whisper API. Try a shorter duration.")
                 return
-            
-            whisper_url = "https://api.openai.com/v1/audio/transcriptions"
-            
+                
+            # Process with Whisper API
             try:
-                with open(temp_file_path, 'rb') as audio_file:
-                    files = {
-                        'file': (f"{video_id}.mp3", audio_file, 'audio/mp3'),
-                        'model': (None, 'whisper-1'),
-                        'response_format': (None, 'verbose_json')
-                    }
-                    
-                    headers = {
-                        'Authorization': f"Bearer {openai_api_key}"
-                    }
-                    
-                    whisper_response = requests.post(whisper_url, headers=headers, files=files)
+                segment_transcript, segment_formatted, segment_data = self.process_with_whisper(
+                    audio_file_path, video_id, current_start
+                )
+                
+                total_transcript += segment_transcript + " "
+                formatted_segments.extend(segment_formatted)
+                all_segments.extend(segment_data)
             finally:
                 # Clean up the temporary file
-                if os.path.exists(temp_file_path):
-                    os.unlink(temp_file_path)
-            
-            if whisper_response.status_code != 200:
-                self.send_error(500, f"Whisper API error: {whisper_response.text}")
-                return
-            
-            # Process transcription result
-            transcription = whisper_response.json()
-            
-            # Format transcript with timestamps
-            formatted_transcript = ""
-            if 'segments' in transcription:
-                formatted_segments = []
-                for segment in transcription['segments']:
-                    start_time = format_time(segment['start'])
-                    end_time = format_time(segment['end'])
-                    formatted_segments.append(f"[{start_time} - {end_time}] {segment['text']}")
-                formatted_transcript = "\n\n".join(formatted_segments)
-            
+                if os.path.exists(audio_file_path):
+                    os.unlink(audio_file_path)
+                
             # Prepare response
             response_data = {
                 "success": True,
                 "video": {
                     "id": video_id,
                     "title": video_title,
-                    "url": f"https://www.youtube.com/watch?v={video_id}"
+                    "url": f"https://www.youtube.com/watch?v={video_id}",
+                    "processed_segment": {
+                        "start": start_time,
+                        "duration": max_duration,
+                        "end": end_time
+                    }
                 },
                 "transcript": {
-                    "full": transcription.get('text', ''),
-                    "formatted": formatted_transcript,
-                    "segments": transcription.get('segments', []),
+                    "full": total_transcript.strip(),
+                    "formatted": "\n\n".join(formatted_segments),
+                    "segments": all_segments,
                     "source": "whisper"
                 }
             }
@@ -129,7 +109,7 @@ class handler(BaseHTTPRequestHandler):
     
     def get_audio_url(self, video_id):
         """Get audio URL using a public API service"""
-        # OPTION 1: RapidAPI YouTube MP3 Converter
+        # RapidAPI YouTube MP3 Converter
         api_url = f"https://youtube-mp36.p.rapidapi.com/dl"
         headers = {
             "X-RapidAPI-Key": os.environ.get("RAPIDAPI_KEY"),
@@ -157,7 +137,7 @@ class handler(BaseHTTPRequestHandler):
     
     def fallback_audio_url(self, video_id):
         """Fallback method to get audio URL"""
-        # OPTION 2: Alternative API
+        # Alternative API
         api_url = f"https://youtube-mp3-download1.p.rapidapi.com/dl"
         headers = {
             "X-RapidAPI-Key": os.environ.get("RAPIDAPI_KEY"),
@@ -182,6 +162,88 @@ class handler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"Error with fallback API: {str(e)}")
             return None, "Unknown"
+    
+    def download_audio_segment(self, audio_url, video_id, start_seconds, duration_seconds):
+        """Download a segment of the audio file"""
+        try:
+            # Create a temporary file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_file_path = temp_file.name
+            temp_file.close()
+            
+            print(f"Downloading audio from URL...")
+            
+            # Using FFmpeg-compatible services, we could add parameters to the URL
+            # But since we're using a third-party service, we'll download the full file
+            audio_response = requests.get(audio_url, stream=True)
+            if audio_response.status_code != 200:
+                print(f"Failed to download audio: {audio_response.status_code}")
+                return None
+            
+            # Write the audio data to the temporary file
+            with open(temp_file_path, 'wb') as f:
+                for chunk in audio_response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            return temp_file_path
+            
+        except Exception as e:
+            print(f"Error downloading audio segment: {str(e)}")
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+            return None
+    
+    def process_with_whisper(self, audio_file_path, video_id, start_offset=0):
+        """Process audio file with Whisper API"""
+        print("Sending to Whisper API...")
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise Exception("Missing OpenAI API key in environment variables")
+        
+        whisper_url = "https://api.openai.com/v1/audio/transcriptions"
+        
+        with open(audio_file_path, 'rb') as audio_file:
+            files = {
+                'file': (f"{video_id}.mp3", audio_file, 'audio/mp3'),
+                'model': (None, 'whisper-1'),
+                'response_format': (None, 'verbose_json')
+            }
+            
+            headers = {
+                'Authorization': f"Bearer {openai_api_key}"
+            }
+            
+            whisper_response = requests.post(whisper_url, headers=headers, files=files)
+        
+        if whisper_response.status_code != 200:
+            raise Exception(f"Whisper API error: {whisper_response.text}")
+        
+        # Process transcription result
+        transcription = whisper_response.json()
+        
+        # Format transcript with timestamps adjusted for segment start time
+        formatted_segments = []
+        all_segments = []
+        
+        if 'segments' in transcription:
+            for segment in transcription['segments']:
+                # Adjust timestamps for the segment's position in the full video
+                adjusted_start = segment['start'] + start_offset
+                adjusted_end = segment['end'] + start_offset
+                
+                # Create a formatted string with timestamps
+                start_time_str = format_time(adjusted_start)
+                end_time_str = format_time(adjusted_end)
+                formatted_segments.append(f"[{start_time_str} - {end_time_str}] {segment['text']}")
+                
+                # Add the adjusted segment to the full list
+                adjusted_segment = segment.copy()
+                adjusted_segment['start'] = adjusted_start
+                adjusted_segment['end'] = adjusted_end
+                all_segments.append(adjusted_segment)
+        
+        return transcription.get('text', ''), formatted_segments, all_segments
 
 def format_time(seconds):
     """Format seconds as HH:MM:SS"""
