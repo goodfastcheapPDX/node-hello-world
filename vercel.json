@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "functions": {
+    "api/transcribe.py": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/transcribe",
+      "dest": "/api/transcribe.py"
+    }
+  ],
+  "env": {
+    "OPENAI_API_KEY": "@openai-api-key",
+    "CF_CLEARANCE": "@cf-clearance"
+  }
+}
