@@ -5,7 +5,8 @@ import urllib.parse
 import requests
 import os
 import tempfile
-from pytube import YouTube
+from pytubefix import YouTube
+from pytubefix.cli import on_progress
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -24,13 +25,14 @@ class handler(BaseHTTPRequestHandler):
             youtube_url = f"https://www.youtube.com/watch?v={video_id}"
             print(f"Processing YouTube video: {youtube_url}")
             
-            # Get audio using pytube (no cookie required)
+            # Get audio using pytubefix (more reliable than pytube)
             try:
-                yt = YouTube(youtube_url)
+                yt = YouTube(youtube_url, on_progress_callback=on_progress)
                 video_title = yt.title
+                print(f"Video title: {video_title}")
                 
-                # Get audio stream (audio only, lowest bitrate for faster processing)
-                audio_stream = yt.streams.filter(only_audio=True).order_by('abr').first()
+                # Get audio stream (audio only, preferring higher quality while maintaining reasonable file size)
+                audio_stream = yt.streams.get_audio_only()
                 if not audio_stream:
                     self.send_error(404, "No audio stream found for this video")
                     return
@@ -102,7 +104,8 @@ class handler(BaseHTTPRequestHandler):
                 "video": {
                     "id": video_id,
                     "title": video_title,
-                    "url": youtube_url
+                    "url": youtube_url,
+                    "duration": yt.length  # Include video duration in seconds
                 },
                 "transcript": {
                     "full": transcription.get('text', ''),
