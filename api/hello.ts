@@ -1,4 +1,5 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node'
+// api/transcribe.js - Vercel Serverless Function
+// This function extracts audio from a YouTube video and transcribes it using OpenAI's Whisper API
 
 import { createReadStream, createWriteStream, unlinkSync } from 'fs';
 import { join } from 'path';
@@ -24,23 +25,30 @@ function formatTime(seconds) {
   return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req, res) {
   // Only allow GET requests
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Get YouTube URL from query parameter
+  // Get YouTube video ID directly or from URL
+  let videoId = req.query.id;
   const youtubeUrl = req.query.url;
-  if (!youtubeUrl) {
-    return res.status(400).json({ error: 'Missing YouTube URL. Use ?url=YOUTUBE_URL' });
+  
+  // If no direct ID is provided but URL is, try to extract ID from URL
+  if (!videoId && youtubeUrl) {
+    videoId = extractYouTubeId(youtubeUrl);
   }
-
-  // Extract YouTube ID
-  const videoId = extractYouTubeId(youtubeUrl);
+  
+  // Check if we have a valid video ID
   if (!videoId) {
-    return res.status(400).json({ error: 'Invalid YouTube URL' });
+    return res.status(400).json({ 
+      error: 'Missing or invalid YouTube video ID. Use ?id=VIDEO_ID or ?url=YOUTUBE_URL' 
+    });
   }
+  
+  // Construct a standard YouTube URL from the ID
+  const standardUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
   // Use a unique filename to avoid conflicts
   const uniqueId = randomUUID();
@@ -50,6 +58,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // First, get video info to show what we're processing
     const videoInfo = await ytdl.getInfo(videoId);
     const videoTitle = videoInfo.videoDetails.title;
+    const actualUrl = videoInfo.videoDetails.video_url; // Get the actual URL from the video info
     
     // Download and convert YouTube audio
     console.log(`Downloading audio for: ${videoTitle}`);
@@ -58,7 +67,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const outputStream = createWriteStream(outputPath);
     
     // Download only audio in mp3 format using ytdl
-    ytdl(youtubeUrl, {
+    ytdl(standardUrl, {
       filter: 'audioonly',
       quality: 'lowestaudio',
     }).pipe(outputStream);
@@ -115,7 +124,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       video: {
         id: videoId,
         title: videoTitle,
-        url: youtubeUrl
+        url: actualUrl || standardUrl
       },
       transcript: {
         full: transcription.text,
