@@ -5,38 +5,6 @@ import urllib.parse
 import requests
 import os
 import tempfile
-import subprocess
-
-# Function to download audio using yt-dlp (most reliable approach)
-def download_youtube_audio(video_id, output_path):
-    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-    
-    # Construct command to download audio only, optimized for speed
-    command = [
-        "yt-dlp",
-        "--no-check-certificate",  # Skip HTTPS certification validation
-        "--no-warnings",           # Reduce output noise
-        "--quiet",                 # Even less output
-        "-f", "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio", # Prioritize smaller formats
-        "--extract-audio",
-        "--audio-format", "mp3",
-        "--audio-quality", "128K", # Lower quality = smaller file = faster upload to Whisper
-        "-o", output_path,
-        youtube_url
-    ]
-    
-    # Execute the command
-    process = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        universal_newlines=True
-    )
-    
-    if process.returncode != 0:
-        raise Exception(f"Error downloading audio: {process.stderr}")
-    
-    return process.stdout
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -51,25 +19,38 @@ class handler(BaseHTTPRequestHandler):
                 self.send_error(400, "Missing video ID parameter. Use ?id=VIDEO_ID")
                 return
             
-            # Set up temporary file for audio
-            temp_dir = tempfile.gettempdir()
-            temp_file_path = os.path.join(temp_dir, f"{video_id}.mp3")
+            # Use a reliable public API to get the audio URL
+            # The example below uses yt-api.p.rapidapi.com, but you can replace with any similar service
+            print(f"Getting audio URL for video ID: {video_id}")
             
-            # Download audio using yt-dlp
+            audio_url, video_title = self.get_audio_url(video_id)
+            if not audio_url:
+                self.send_error(500, "Failed to get audio URL")
+                return
+                
+            print(f"Got audio URL for '{video_title}'")
+            
+            # Download the audio file
+            print(f"Downloading audio from URL...")
             try:
-                print(f"Downloading audio for {video_id}...")
-                download_youtube_audio(video_id, temp_file_path)
-                
-                if not os.path.exists(temp_file_path):
-                    self.send_error(500, "Failed to download audio file")
+                audio_response = requests.get(audio_url, stream=True)
+                if audio_response.status_code != 200:
+                    self.send_error(500, f"Failed to download audio: {audio_response.status_code}")
                     return
-                    
+                
+                # Save to a temporary file
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+                temp_file_path = temp_file.name
+                
+                # Write the audio data to the temporary file
+                for chunk in audio_response.iter_content(chunk_size=8192):
+                    if chunk:
+                        temp_file.write(chunk)
+                temp_file.close()
+                
                 file_size = os.path.getsize(temp_file_path)
-                print(f"Download complete: {file_size} bytes")
+                print(f"Audio downloaded: {file_size} bytes")
                 
-                if file_size == 0:
-                    self.send_error(500, "Downloaded audio file is empty")
-                    return
             except Exception as e:
                 self.send_error(500, f"Error downloading audio: {str(e)}")
                 return
@@ -80,7 +61,7 @@ class handler(BaseHTTPRequestHandler):
             if not openai_api_key:
                 self.send_error(500, "Missing OpenAI API key in environment variables")
                 if os.path.exists(temp_file_path):
-                    os.unlink(temp_file_path)  # Clean up
+                    os.unlink(temp_file_path)
                 return
             
             whisper_url = "https://api.openai.com/v1/audio/transcriptions"
@@ -125,6 +106,7 @@ class handler(BaseHTTPRequestHandler):
                 "success": True,
                 "video": {
                     "id": video_id,
+                    "title": video_title,
                     "url": f"https://www.youtube.com/watch?v={video_id}"
                 },
                 "transcript": {
@@ -144,6 +126,62 @@ class handler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"Error: {str(e)}")
             self.send_error(500, f"Error processing request: {str(e)}")
+    
+    def get_audio_url(self, video_id):
+        """Get audio URL using a public API service"""
+        # OPTION 1: RapidAPI YouTube MP3 Converter
+        api_url = f"https://youtube-mp36.p.rapidapi.com/dl"
+        headers = {
+            "X-RapidAPI-Key": os.environ.get("RAPIDAPI_KEY"),
+            "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com"
+        }
+        
+        params = {"id": video_id}
+        
+        try:
+            response = requests.get(api_url, headers=headers, params=params)
+            if response.status_code != 200:
+                print(f"API call failed: {response.text}")
+                return self.fallback_audio_url(video_id)
+            
+            data = response.json()
+            if data.get("status") == "ok" and "link" in data:
+                return data["link"], data.get("title", "Unknown")
+            else:
+                print(f"API returned invalid data: {data}")
+                return self.fallback_audio_url(video_id)
+                
+        except Exception as e:
+            print(f"Error with primary API: {str(e)}")
+            return self.fallback_audio_url(video_id)
+    
+    def fallback_audio_url(self, video_id):
+        """Fallback method to get audio URL"""
+        # OPTION 2: Alternative API
+        api_url = f"https://youtube-mp3-download1.p.rapidapi.com/dl"
+        headers = {
+            "X-RapidAPI-Key": os.environ.get("RAPIDAPI_KEY"),
+            "X-RapidAPI-Host": "youtube-mp3-download1.p.rapidapi.com"
+        }
+        
+        params = {"id": video_id}
+        
+        try:
+            response = requests.get(api_url, headers=headers, params=params)
+            if response.status_code != 200:
+                print(f"Fallback API call failed: {response.text}")
+                return None, "Unknown"
+            
+            data = response.json()
+            if "link" in data:
+                return data["link"], data.get("title", "Unknown")
+            else:
+                print(f"Fallback API returned invalid data: {data}")
+                return None, "Unknown"
+                
+        except Exception as e:
+            print(f"Error with fallback API: {str(e)}")
+            return None, "Unknown"
 
 def format_time(seconds):
     """Format seconds as HH:MM:SS"""
